@@ -1,0 +1,228 @@
+services:
+  # ─── PostgreSQL Database ───────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: netaudit_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netaudit}
+      POSTGRES_USER: ${POSTGRES_USER:-netaudit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netaudit}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - netaudit_internal
+
+  # ─── Redis (job queue + session cache) ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: netaudit_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - netaudit_internal
+
+  # ─── Database migrations (runs once, then exits) ──────────────────
+  # Alembic is the only thing that creates/changes tables. Existing database that already
+  # matches the models (created by an older version)?  docker compose run --rm migrate alembic stamp head
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netaudit_migrate
+    command: alembic upgrade head
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-netaudit}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-netaudit}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - netaudit_internal
+
+  # ─── FastAPI Backend ───────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netaudit_api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-netaudit}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-netaudit}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://localhost}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      VIRUSTOTAL_API_KEY: ${VIRUSTOTAL_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - scan_results:/app/scan_results
+      - clamav_sigs:/var/lib/clamav
+      # Agent installer files served by /api/agent/download (single source: ./agent)
+      - ./agent:/app/agent_files:ro
+    networks:
+      - netaudit_internal
+    # The API only serves HTTP: no extra capabilities, no privilege escalation.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─── Celery Worker — host network so Nmap can reach the LAN ───────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netaudit_worker
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
+    network_mode: host
+    # Needs raw sockets (nmap SYN scans, packet capture), so it stays root + NET_RAW/NET_ADMIN.
+    # It is the only privileged service; it never accepts inbound connections.
+    user: "0:0"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-netaudit}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@127.0.0.1:5432/${POSTGRES_DB:-netaudit}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@127.0.0.1:6379/0
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      NETAUDIT_WORKER: "true"
+      RETENTION_SCAN_DAYS: ${RETENTION_SCAN_DAYS:-180}
+      RETENTION_CAPTURE_DAYS: ${RETENTION_CAPTURE_DAYS:-7}
+      RETENTION_DEVICE_DAYS: ${RETENTION_DEVICE_DAYS:-365}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - scan_results:/app/scan_results
+      - clamav_sigs:/var/lib/clamav
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+  # ─── Celery Beat (scheduled scan trigger) ─────────────────────────
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: netaudit_beat
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler --schedule /tmp/celerybeat-schedule
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-netaudit}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-netaudit}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      NETAUDIT_WORKER: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - netaudit_internal
+
+  # ─── ClamAV Daemon ─────────────────────────────────────────────────
+  clamav:
+    image: clamav/clamav:stable
+    container_name: netaudit_clamav
+    restart: unless-stopped
+    environment:
+      CLAMAV_NO_FRESHCLAM: "false"
+    volumes:
+      - clamav_sigs:/var/lib/clamav
+      - scan_quarantine:/quarantine
+    networks:
+      - netaudit_internal
+    healthcheck:
+      test: ["CMD", "clamdscan", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ─── React Frontend ────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_WS_URL: ${VITE_WS_URL:-/ws}
+        VITE_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+    container_name: netaudit_frontend
+    restart: unless-stopped
+    networks:
+      - netaudit_internal
+
+  # ─── Nginx Reverse Proxy ───────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: netaudit_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    networks:
+      - netaudit_internal
+      - netaudit_external
+
+networks:
+  netaudit_internal:
+    driver: bridge
+  netaudit_external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  scan_results:
+  clamav_sigs:
+  scan_quarantine:

@@ -1,0 +1,63 @@
+# ─── Environment & secrets ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# ─── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ─── Node / Frontend ───────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ─── Docker ────────────────────────────────────────────────────────
+docker/nginx/certs/*.crt
+docker/nginx/certs/*.key
+docker/nginx/certs/*.pem
+
+# ─── Scan results & captures ───────────────────────────────────────
+backend/scan_results/
+*.pcap
+*.cap
+
+# ─── Database dumps ────────────────────────────────────────────────
+*.sql.gz
+*.dump
+*.sql.bak
+
+# ─── IDE / OS ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.orig
+
+# ─── Logs ──────────────────────────────────────────────────────────
+*.log
+logs/
