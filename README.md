@@ -129,3 +129,11 @@ alembic check                                               # must print: No new
 
 Existing database from before migrations that already matches the models:
 `docker compose run --rm migrate alembic stamp head`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request, and weekly (new advisories appear without commits):
+backend tests; migrations applied to an empty Postgres, `alembic check` (fails if a model change has no migration) and
+downgrade/re-upgrade; `pip-audit`; frontend `tsc`, build and `npm audit`; and `docker compose config`. Dependabot
+(`.github/dependabot.yml`) opens weekly update PRs. In GitHub, mark the CI jobs as required checks on `main` (branch
+protection) so a failing audit or missing migration blocks merging.
