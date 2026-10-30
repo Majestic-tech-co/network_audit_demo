@@ -16,7 +16,7 @@
     "@tanstack/react-query": "^5.40.0",
     "axios": "^1.7.0",
     "reactflow": "^11.11.0",
-    "zustand": "^4.5.2",
+    "zustand": "^5.0.16",
     "react-hook-form": "^7.51.5",
     "date-fns": "^3.6.0",
     "lucide-react": "^0.383.0",
