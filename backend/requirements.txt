@@ -23,7 +23,7 @@ bcrypt==4.3.0
 
 # ─── Scanning ─────────────────────────────────────────────────────
 python-nmap==0.7.1
-scapy==2.7.0
+scapy==2.8.0
 psutil==7.2.2
 
 # ─── AI providers (outbound calls only) ───────────────────────────
